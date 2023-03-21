@@ -14,8 +14,6 @@ import os
 from sklearn.metrics import f1_score
 import math
 ROWS_PER_FRAME = 543
-
-
 class FeatureGen(nn.Module):
     def __init__(self):
         super(FeatureGen, self).__init__()
@@ -30,17 +28,17 @@ class FeatureGen(nn.Module):
         lefth_x = lefth_x[~torch.any(torch.isnan(lefth_x), dim=1), :]
         righth_x = righth_x[~torch.any(torch.isnan(righth_x), dim=1), :]
 
-        x1m = torch.mean(face_x, 0).reshape(468, 3)
-        x2m = torch.mean(lefth_x, 0).reshape(21, 3)
-        x3m = torch.mean(pose_x, 0).reshape(33, 3)
-        x4m = torch.mean(righth_x, 0).reshape(21, 3)
+        x1m = torch.mean(face_x, 0).reshape(468, 3).T
+        x2m = torch.mean(lefth_x, 0).reshape(21, 3).T
+        x3m = torch.mean(pose_x, 0).reshape(33, 3).T
+        x4m = torch.mean(righth_x, 0).reshape(21, 3).T
 
-        x1s = torch.std(face_x, 0).reshape(468, 3)
-        x2s = torch.std(lefth_x, 0).reshape(21, 3)
-        x3s = torch.std(pose_x, 0).reshape(33, 3)
-        x4s = torch.std(righth_x, 0).reshape(21, 3)
+        x1s = torch.std(face_x, 0).reshape(468, 3).T
+        x2s = torch.std(lefth_x, 0).reshape(21, 3).T
+        x3s = torch.std(pose_x, 0).reshape(33, 3).T
+        x4s = torch.std(righth_x, 0).reshape(21, 3).T
 
-        xfeat = torch.cat([x1m, x1s, x2m, x2s, x3m, x3s, x4m, x4s], axis=0)
+        xfeat = torch.cat([x1m, x1s, x2m, x2s, x3m, x3s, x4m, x4s], axis=1)
         xfeat = torch.where(torch.isnan(xfeat), torch.tensor(0.0, dtype=torch.float32), xfeat)
 
         return xfeat
@@ -58,52 +56,6 @@ def convert_row(row, feature_converter):
     x = load_relevant_data_subset(os.path.join("./asl-signs", row[1].path))
     x = feature_converter(torch.tensor(x)).cpu().numpy()
     return x, row[1].label
-
-class ArcMarginProduct(nn.Module):
-    def __init__(
-        self,
-        in_features,
-        out_features,
-        scale=30.0,
-        margin=0.50,
-        easy_margin=False,
-        ls_eps=0.0,
-    ):
-        super(ArcMarginProduct, self).__init__()
-        self.in_features = in_features
-        self.out_features = out_features
-        self.scale = scale
-        self.margin = margin
-        self.ls_eps = ls_eps  # label smoothing
-        self.weight = nn.Parameter(torch.FloatTensor(out_features, in_features))
-        nn.init.xavier_uniform_(self.weight)
-
-        self.easy_margin = easy_margin
-        self.cos_m = math.cos(margin)
-        self.sin_m = math.sin(margin)
-        self.th = math.cos(math.pi - margin)
-        self.mm = math.sin(math.pi - margin) * margin
-
-    def forward(self, input, label):
-        # --------------------------- cos(theta) & phi(theta) ---------------------------
-        cosine = F.linear(F.normalize(input), F.normalize(self.weight))
-        sine = torch.sqrt(1.0 - torch.pow(cosine, 2))
-        phi = cosine * self.cos_m - sine * self.sin_m
-        if self.easy_margin:
-            phi = torch.where(cosine > 0, phi, cosine)
-        else:
-            phi = torch.where(cosine > self.th, phi, cosine - self.mm)
-        # --------------------------- convert label to one-hot ---------------------------
-        # one_hot = torch.zeros(cosine.size(), requires_grad=True, device='cuda')
-        one_hot = torch.zeros(cosine.size(), device='cuda')
-        one_hot.scatter_(1, label.view(-1, 1).long(), 1)
-        if self.ls_eps > 0:
-            one_hot = (1 - self.ls_eps) * one_hot + self.ls_eps / self.out_features
-        # -------------torch.where(out_i = {x_i if condition_i else y_i) -------------
-        output = (one_hot * phi) + ((1.0 - one_hot) * cosine)
-        output *= self.scale
-
-        return output
 
 def convert_and_save_data(feature_converter):
     df = pd.read_csv(TRAIN_FILE)
@@ -148,25 +100,28 @@ class CNN_Model(nn.Module):
             nn.GELU(),
             nn.BatchNorm1d(6),
             nn.Dropout(0.3,inplace=False))
-        self.classifier1 = nn.Sequential(nn.Linear(1614, 807), nn.GELU(),
+        self.classifier1 = nn.Sequential(nn.Linear(1614, 807),
+                                         nn.GELU(),
                                          nn.BatchNorm1d(807),
                                          nn.Dropout(0.2,inplace=False),
-                                         nn.Linear(807, 250))
+                                         nn.Linear(807, 250),
+                                         nn.BatchNorm1d(250))
 
         self.dependent = dependent
     def forward(self, x):
         if not self.dependent:
             x = x.permute(0, 2, 1)
-
         X1 = self.CNN(x)
         return self.classifier1(X1.view(-1, 1614))
 
 class RGB_Linear_Model(nn.Module):
-    def __init__(self):
+    def __init__(self,hidden):
         super(RGB_Linear_Model, self).__init__()
-        self.RGB_Linear = nn.Sequential(nn.Dropout(0.2), nn.Linear(3508, 877),nn.BatchNorm1d(877),
-                                        nn.Dropout(0.2,inplace=False), nn.GELU(),
-                                        nn.Linear(877, 250),nn.BatchNorm1d(250))
+        self.RGB_Linear = nn.Sequential(nn.Linear(3508, hidden),
+                                        nn.Dropout(0.2),
+                                        nn.GELU(),
+                                        nn.BatchNorm1d(hidden),
+                                        nn.GELU())
 
     def forward(self, x):
         return self.RGB_Linear(x)
@@ -176,30 +131,52 @@ class Multiple_Ensemble(nn.Module):
     def __init__(self):
         super(Multiple_Ensemble, self).__init__()
         self.CNN = CNN_Model(dependent=True)
-        self.boost_rate = nn.Parameter(torch.tensor(0.5, requires_grad=True, device="cuda"))
-        self.classifier2 = RGB_Linear_Model()
-        self.classifier3_encoder = nn.Sequential(
+
+        self.encoder2 = nn.Sequential(
             nn.Conv1d(3, 4, kernel_size=4),
             nn.GELU(),
             nn.BatchNorm1d(4),
-            nn.AdaptiveAvgPool1d(400))
-        self.classifier3 =  nn.GRUCell(1600,250)
+            nn.AvgPool1d(kernel_size=3))
+        self.classifier2 = nn.Sequential(nn.Linear(1694,500),
+                                         nn.BatchNorm1d(500),
+                                         nn.GELU(),
+                                         nn.Dropout(0.2),
+                                         nn.Linear(500,250),
+                                         nn.BatchNorm1d(250))
 
+        self.encoder3 = RGB_Linear_Model(1200)
+        self.classifier3 = nn.Sequential(nn.Linear(1200,500),
+                                         nn.BatchNorm1d(500),
+                                         nn.GELU(),
+                                         nn.Dropout(0.2),
+                                         nn.Linear(500,250),
+                                         nn.BatchNorm1d(250))
 
-        self.boost_rate_1 = nn.Parameter(torch.tensor(0.33, requires_grad=True, device="cuda"))
-        self.boost_rate_2 = nn.Parameter(torch.tensor(0.33, requires_grad=True, device="cuda"))
-        self.boost_rate_3 = nn.Parameter(torch.tensor(0.33, requires_grad=True, device="cuda"))
+        self.encoder4 = RGB_Linear_Model(600)
+        self.classifier4 = nn.Sequential(nn.Linear(600, 250),
+                                         nn.BatchNorm1d(250))
+
+        self.boost_rate1 = nn.Parameter(torch.tensor(1/4, requires_grad=True, device="cuda"))
+        self.boost_rate2 = nn.Parameter(torch.tensor(1/4, requires_grad=True, device="cuda"))
+        self.boost_rate3 = nn.Parameter(torch.tensor(1/4, requires_grad=True, device="cuda"))
+        self.boost_rate4 = nn.Parameter(torch.tensor(1/4, requires_grad=True, device="cuda"))
+
     def forward(self, x):
-        x = x.permute(0, 2, 1)
         X1 = self.CNN(x)
 
-        X2 = torch.cat([x.reshape(-1, 3258), X1], dim=1)
+        X2 = self.encoder2(x)
+        X2 = torch.cat([X2.reshape(-1, 1444), X1], dim=1)
         X2 = self.classifier2(X2)
 
-        X3 = self.classifier3_encoder(x)
-        X3 =  self.classifier3(X3.reshape(-1,1600),X2)
+        X3 = torch.cat([x.reshape(-1, 3258), X2], dim=1)
+        X3 = self.encoder3(X3)
+        X3 = self.classifier3(X3)
 
-        return self.boost_rate_1*X1 +self.boost_rate_2*X2 +self.boost_rate_3*X3
+        X4 = torch.cat([x.reshape(-1, 3258), X3], dim=1)
+        X4 = self.encoder4(X4)
+        X4 = self.classifier4(X4)
+
+        return self.boost_rate1*X1 +self.boost_rate2*X2 +self.boost_rate3*X3+self.boost_rate4*X4
 
 
 import onnx
@@ -217,6 +194,25 @@ class ASLData(Dataset):
     def __len__(self):
         return len(self.datay)
 
+import tensorflow as tf
+
+
+class ASLInferModel(tf.Module):
+    def __init__(self):
+        super(ASLInferModel, self).__init__()
+        self.feature_gen = tf.saved_model.load('./tf_feat_gen')
+        self.model = tf.saved_model.load('./tf_model')
+        self.feature_gen.trainable = False
+        self.model.trainable = False
+
+    @tf.function(input_signature=[
+        tf.TensorSpec(shape=[None, 543, 3], dtype=tf.float32, name='inputs')
+    ])
+    def call(self, input):
+        output_tensors = {}
+        features = self.feature_gen(**{'input': input})['output']
+        output_tensors['outputs'] = self.model(**{'input': tf.expand_dims(features, 0)})['output'][0, :]
+        return output_tensors
 
 warnings.filterwarnings(action='ignore')
 if __name__ == '__main__':
@@ -233,13 +229,53 @@ if __name__ == '__main__':
 
 
     model = Multiple_Ensemble().cuda()
-   # saved_cnn = torch.load('./saved_CNN.pt')
-   # model.CNN.load_state_dict(saved_cnn)
     #saved_model = torch.load('./best_model.pt')
     #model.load_state_dict(saved_model)
 
+    sample_input = torch.rand((50, 543, 3))
+    onnx_feat_gen_path = 'feature_gen.onnx'
+    feature_converter = FeatureGen()
+    feature_converter.eval()
+
+    torch.onnx.export(
+        feature_converter,  # PyTorch Model
+        sample_input,  # Input tensor
+        onnx_feat_gen_path,  # Output file (eg. 'output_model.onnx')
+        opset_version=12,  # Operator support version
+        input_names=['input'],  # Input tensor name (arbitary)
+        output_names=['output'],  # Output tensor name (arbitary)
+        dynamic_axes={
+            'input': {0: 'input'}
+        }
+    )
+    onnx_model_path = 'asl_model.onnx'
+    sample_input = torch.rand((1, 3, 1086)).cuda()
+    torch.onnx.export(
+        model,  # PyTorch Model
+        sample_input,  # Input tensor
+        onnx_model_path,  # Output file (eg. 'output_model.onnx')
+        opset_version=12,  # Operator support version
+        input_names=['input'],  # Input tensor name (arbitary)
+        output_names=['output'],  # Output tensor name (arbitary)
+        dynamic_axes={
+            'input': {0: 'input'}
+        }
+    )
+    tf_feat_gen_path = './tf_feat_gen'
+    onnx_feat_gen = onnx.load(onnx_feat_gen_path)
+    tf_rep = prepare(onnx_feat_gen)
+    tf_rep.export_graph(tf_feat_gen_path)
+
+    tf_model_path = './tf_model'
+    onnx_model = onnx.load(onnx_model_path)
+    tf_rep = prepare(onnx_model)
+    tf_rep.export_graph(tf_model_path)
+
+    mytfmodel = ASLInferModel()
+    tf.saved_model.save(mytfmodel, './tf_infer_model', signatures={'serving_default': mytfmodel.call})
+
     opt = torch.optim.AdamW(model.parameters(), lr=0.02,weight_decay=1e-6)
-    criterion = nn.CrossEntropyLoss()
+    criterion =  nn.CrossEntropyLoss()
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt,T_max=20, eta_min=1e-5)
 
     for i in range(EPOCHS):
@@ -283,7 +319,7 @@ if __name__ == '__main__':
             y = torch.Tensor(y).long().cuda()
 
             with torch.no_grad():
-                y_pred= model(x)
+                y_pred = model(x)
                 loss = criterion(y_pred, y)
                 val_loss_sum += loss.item()
                 val_correct += np.sum((np.argmax(y_pred.cpu().numpy(), axis=1) == y.cpu().numpy()))
