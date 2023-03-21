@@ -1,4 +1,6 @@
 import json
+import random
+
 import numpy as np
 import torch
 import torch.nn as nn
@@ -10,7 +12,7 @@ from tqdm import tqdm
 import pandas as pd
 import os
 from sklearn.metrics import f1_score
-
+import math
 ROWS_PER_FRAME = 543
 
 
@@ -57,6 +59,51 @@ def convert_row(row, feature_converter):
     x = feature_converter(torch.tensor(x)).cpu().numpy()
     return x, row[1].label
 
+class ArcMarginProduct(nn.Module):
+    def __init__(
+        self,
+        in_features,
+        out_features,
+        scale=30.0,
+        margin=0.50,
+        easy_margin=False,
+        ls_eps=0.0,
+    ):
+        super(ArcMarginProduct, self).__init__()
+        self.in_features = in_features
+        self.out_features = out_features
+        self.scale = scale
+        self.margin = margin
+        self.ls_eps = ls_eps  # label smoothing
+        self.weight = nn.Parameter(torch.FloatTensor(out_features, in_features))
+        nn.init.xavier_uniform_(self.weight)
+
+        self.easy_margin = easy_margin
+        self.cos_m = math.cos(margin)
+        self.sin_m = math.sin(margin)
+        self.th = math.cos(math.pi - margin)
+        self.mm = math.sin(math.pi - margin) * margin
+
+    def forward(self, input, label):
+        # --------------------------- cos(theta) & phi(theta) ---------------------------
+        cosine = F.linear(F.normalize(input), F.normalize(self.weight))
+        sine = torch.sqrt(1.0 - torch.pow(cosine, 2))
+        phi = cosine * self.cos_m - sine * self.sin_m
+        if self.easy_margin:
+            phi = torch.where(cosine > 0, phi, cosine)
+        else:
+            phi = torch.where(cosine > self.th, phi, cosine - self.mm)
+        # --------------------------- convert label to one-hot ---------------------------
+        # one_hot = torch.zeros(cosine.size(), requires_grad=True, device='cuda')
+        one_hot = torch.zeros(cosine.size(), device='cuda')
+        one_hot.scatter_(1, label.view(-1, 1).long(), 1)
+        if self.ls_eps > 0:
+            one_hot = (1 - self.ls_eps) * one_hot + self.ls_eps / self.out_features
+        # -------------torch.where(out_i = {x_i if condition_i else y_i) -------------
+        output = (one_hot * phi) + ((1.0 - one_hot) * cosine)
+        output *= self.scale
+
+        return output
 
 def convert_and_save_data(feature_converter):
     df = pd.read_csv(TRAIN_FILE)
@@ -83,11 +130,9 @@ QUICK_LIMIT = 200
 LANDMARK_FILES_DIR = "./asl-signs/train_landmark_files"
 TRAIN_FILE = "./asl-signs/train.csv"
 label_map = json.load(open("./asl-signs/sign_to_prediction_index_map.json", "r"))
-
-
-class Multiple_Ensemble(nn.Module):
-    def __init__(self):
-        super(Multiple_Ensemble, self).__init__()
+class CNN_Model(nn.Module):
+    def __init__(self,dependent = False):
+        super(CNN_Model, self).__init__()
         self.CNN = nn.Sequential(
             nn.Conv1d(3, 4, kernel_size=3),
             nn.GELU(),
@@ -95,38 +140,66 @@ class Multiple_Ensemble(nn.Module):
             nn.Conv1d(4, 4, kernel_size=3, stride=2),
             nn.GELU(),
             nn.BatchNorm1d(4),
-            nn.Dropout(0.2),
+            nn.Dropout(0.4,inplace=False),
             nn.Conv1d(4, 6, kernel_size=3),
             nn.GELU(),
             nn.BatchNorm1d(6),
             nn.Conv1d(6, 6, kernel_size=3, stride=2),
             nn.GELU(),
             nn.BatchNorm1d(6),
-            nn.Dropout(0.1))
-        self.classifier1 = nn.Sequential(nn.Linear(1614, 807), nn.GELU(), nn.Linear(807, 250))
+            nn.Dropout(0.3,inplace=False))
+        self.classifier1 = nn.Sequential(nn.Linear(1614, 807), nn.GELU(),
+                                         nn.BatchNorm1d(807),
+                                         nn.Dropout(0.2,inplace=False),
+                                         nn.Linear(807, 250))
 
-        self.classifier2 = nn.Sequential(nn.Dropout(0.15), nn.Linear(3508, 877), nn.GELU(), nn.Linear(877, 250))
-
-        self.classifier3 = nn.Sequential(nn.Linear(1336, 500), nn.GELU(), nn.Linear(500, 250))
-
-        self.ensemble = nn.Linear(750, 250)
-
+        self.dependent = dependent
     def forward(self, x):
-        x = x.permute(0, 2, 1)
+        if not self.dependent:
+            x = x.permute(0, 2, 1)
 
         X1 = self.CNN(x)
-        X1 = self.classifier1(X1.view(-1, 1614))
+        return self.classifier1(X1.view(-1, 1614))
+
+class RGB_Linear_Model(nn.Module):
+    def __init__(self):
+        super(RGB_Linear_Model, self).__init__()
+        self.RGB_Linear = nn.Sequential(nn.Dropout(0.2), nn.Linear(3508, 877),nn.BatchNorm1d(877),
+                                        nn.Dropout(0.2,inplace=False), nn.GELU(),
+                                        nn.Linear(877, 250),nn.BatchNorm1d(250))
+
+    def forward(self, x):
+        return self.RGB_Linear(x)
+
+
+class Multiple_Ensemble(nn.Module):
+    def __init__(self):
+        super(Multiple_Ensemble, self).__init__()
+        self.CNN = CNN_Model(dependent=True)
+        self.boost_rate = nn.Parameter(torch.tensor(0.5, requires_grad=True, device="cuda"))
+        self.classifier2 = RGB_Linear_Model()
+        self.classifier3_encoder = nn.Sequential(
+            nn.Conv1d(3, 4, kernel_size=4),
+            nn.GELU(),
+            nn.BatchNorm1d(4),
+            nn.AdaptiveAvgPool1d(400))
+        self.classifier3 =  nn.GRUCell(1600,250)
+
+
+        self.boost_rate_1 = nn.Parameter(torch.tensor(0.33, requires_grad=True, device="cuda"))
+        self.boost_rate_2 = nn.Parameter(torch.tensor(0.33, requires_grad=True, device="cuda"))
+        self.boost_rate_3 = nn.Parameter(torch.tensor(0.33, requires_grad=True, device="cuda"))
+    def forward(self, x):
+        x = x.permute(0, 2, 1)
+        X1 = self.CNN(x)
 
         X2 = torch.cat([x.reshape(-1, 3258), X1], dim=1)
         X2 = self.classifier2(X2)
 
-        X3 = torch.mean(x, dim=1)
-        X3 = torch.cat([X3, X2], dim=1)
+        X3 = self.classifier3_encoder(x)
+        X3 =  self.classifier3(X3.reshape(-1,1600),X2)
 
-        X3 = self.classifier3(X3)
-
-        Ensemble = torch.cat([X1, X2, X3], dim=1)
-        return F.softmax(self.ensemble(Ensemble))
+        return self.boost_rate_1*X1 +self.boost_rate_2*X2 +self.boost_rate_3*X3
 
 
 import onnx
@@ -155,27 +228,30 @@ if __name__ == '__main__':
 
     datax = np.load("./feature_data.npy")
     datay = np.load("./feature_labels.npy")
-    EPOCHS = 60
-    BATCH_SIZE = 256
+    EPOCHS =300
+    BATCH_SIZE = 512
 
-    trainx, testx, trainy, testy = train_test_split(datax, datay, test_size=0.15, random_state=42)
-
-    train_data = ASLData(trainx, trainy)
-    valid_data = ASLData(testx, testy)
-
-    train_loader = DataLoader(train_data, batch_size=BATCH_SIZE, num_workers=4, shuffle=True)
-    val_loader = DataLoader(valid_data, batch_size=BATCH_SIZE, num_workers=4, shuffle=False)
 
     model = Multiple_Ensemble().cuda()
-    #saved_one = torch.load('./saved_model.pt')
-    #model.load_state_dict(saved_one)
+   # saved_cnn = torch.load('./saved_CNN.pt')
+   # model.CNN.load_state_dict(saved_cnn)
+    #saved_model = torch.load('./best_model.pt')
+    #model.load_state_dict(saved_model)
 
-    opt = torch.optim.Adam(model.parameters(), lr=0.01)
+    opt = torch.optim.AdamW(model.parameters(), lr=0.02,weight_decay=1e-6)
     criterion = nn.CrossEntropyLoss()
-    sched = torch.optim.lr_scheduler.StepLR(opt, step_size=300, gamma=0.95)
+    sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt,T_max=20, eta_min=1e-5)
 
     for i in range(EPOCHS):
         model.train()
+        if i%10 == 0:
+            trainx, testx, trainy, testy = train_test_split(datax, datay, test_size=0.35, random_state=random.randint(1,100))
+
+            train_data = ASLData(trainx, trainy)
+            valid_data = ASLData(testx, testy)
+
+            train_loader = DataLoader(train_data, batch_size=BATCH_SIZE, num_workers=4, shuffle=True)
+            val_loader = DataLoader(valid_data, batch_size=BATCH_SIZE, num_workers=4, shuffle=False)
 
         train_loss_sum = 0.
         train_correct = 0
@@ -187,6 +263,7 @@ if __name__ == '__main__':
             y_pred = model(x)
 
             loss = criterion(y_pred, y)
+
             loss.backward()
             opt.step()
             opt.zero_grad()
@@ -206,7 +283,7 @@ if __name__ == '__main__':
             y = torch.Tensor(y).long().cuda()
 
             with torch.no_grad():
-                y_pred = model(x)
+                y_pred= model(x)
                 loss = criterion(y_pred, y)
                 val_loss_sum += loss.item()
                 val_correct += np.sum((np.argmax(y_pred.cpu().numpy(), axis=1) == y.cpu().numpy()))
@@ -219,6 +296,7 @@ if __name__ == '__main__':
         print(
             f"Epoch:{i} > Val Loss: {(val_loss_sum / val_total):.04f}, Val Acc: {val_correct / len(valid_data):0.04f}, Val F1: {_val_score:0.04f}")
         print("=" * 50)
+        torch.save(model.state_dict(), './saved_model.pt')
         if _val_score > best_score:
-            torch.save(model.state_dict(), './saved_model.pt')
+            torch.save(model.state_dict(), './best_model.pt')
             best_score = _val_score
