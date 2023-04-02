@@ -4,38 +4,41 @@ from tqdm import tqdm
 import numpy as np
 import pandas as pd
 
-import torch
-import torch.nn as nn
-
+import tensorflow as tf
 ROWS_PER_FRAME = 543
 
-class FeatureGen(nn.Module):
+import tensorflow as tf
+def tf_nan_mean(x, axis=0):
+    return tf.reduce_sum(tf.where(tf.math.is_nan(x), tf.zeros_like(x), x), axis=axis) / tf.reduce_sum(tf.where(tf.math.is_nan(x), tf.zeros_like(x), tf.ones_like(x)), axis=axis)
+
+def tf_nan_std(x, axis=0):
+    d = x - tf_nan_mean(x, axis=axis)
+    return tf.math.sqrt(tf_nan_mean(d * d, axis=axis))
+class FeatureGen(tf.keras.layers.Layer):
     def __init__(self):
         super(FeatureGen, self).__init__()
-        pass
+    def call(self, x):
+        face_x = x[:, :468, :]
+        lefth_x = x[:, 468:489, :]
+        pose_x = x[:, 489:522, :]
+        righth_x = x[:, 522:, :]
 
-    def forward(self, x):
-        face_x = x[:, :468, :].contiguous().view(-1, 468 * 3)
-        lefth_x = x[:, 468:489, :].contiguous().view(-1, 21 * 3)
-        pose_x = x[:, 489:522, :].contiguous().view(-1, 33 * 3)
-        righth_x = x[:, 522:, :].contiguous().view(-1, 21 * 3)
+        lefth_x =tf.where(tf.math.is_nan(lefth_x), tf.zeros_like(lefth_x), lefth_x)
+        righth_x =tf.where(tf.math.is_nan(righth_x), tf.zeros_like(righth_x), righth_x)
 
-        lefth_x = lefth_x[~torch.any(torch.isnan(lefth_x), dim=1), :]
-        righth_x = righth_x[~torch.any(torch.isnan(righth_x), dim=1), :]
 
-        x1m = torch.mean(face_x, 0).reshape(468,3)
-        x2m = torch.mean(lefth_x, 0).reshape(21,3)
-        x3m = torch.mean(pose_x, 0).reshape(33,3)
-        x4m = torch.mean(righth_x, 0).reshape(21,3)
+        x1m = tf_nan_mean(face_x, 0)
+        x2m = tf_nan_mean(lefth_x, 0)
+        x3m =tf_nan_mean(pose_x, 0)
+        x4m =tf_nan_mean(righth_x, 0)
+        x1s = tf_nan_std(face_x, 0)
+        x2s = tf_nan_std(lefth_x, 0)
+        x3s = tf_nan_std(pose_x, 0)
+        x4s = tf_nan_std(righth_x, 0)
 
-        x1s = torch.std(face_x, 0).reshape(468,3)
-        x2s = torch.std(lefth_x, 0).reshape(21,3)
-        x3s = torch.std(pose_x, 0).reshape(33,3)
-        x4s = torch.std(righth_x, 0).reshape(21,3)
-
-        xfeat = torch.cat([x1m,x1s, x2m,x2s, x3m,x3s, x4m,x4s], axis=0)
-        xfeat = torch.where(torch.isnan(xfeat), torch.tensor(0.0, dtype=torch.float32), xfeat)
-
+        xfeat = tf.concat([x1m, x1s, x2m, x2s, x3m, x3s, x4m, x4s], axis=0)
+        xfeat = tf.where(tf.math.is_nan(xfeat), tf.zeros_like(xfeat), xfeat)
+        xfeat = tf.reshape(xfeat,[-1,1086,3])
         return xfeat
 def load_relevant_data_subset(pq_path):
     data_columns = ['x', 'y', 'z']
@@ -43,9 +46,10 @@ def load_relevant_data_subset(pq_path):
     n_frames = int(len(data) / ROWS_PER_FRAME)
     data = data.values.reshape(n_frames, ROWS_PER_FRAME, len(data_columns))
     return data.astype(np.float32)
+
 def convert_row(row,feature_converter):
      x = load_relevant_data_subset(os.path.join("./asl-signs", row[1].path))
-     x = feature_converter(torch.tensor(x)).cpu().numpy()
+     x = feature_converter(tf.convert_to_tensor(x)).numpy()
      return x, row[1].label
 def convert_and_save_data(feature_converter):
     df = pd.read_csv(TRAIN_FILE)
@@ -75,6 +79,6 @@ TRAIN_FILE = "./asl-signs/train.csv"
 label_map = json.load(open("./asl-signs/sign_to_prediction_index_map.json", "r"))
 
 
-feature_converter = FeatureGen()
+#feature_converter = FeatureGen()
 
-convert_and_save_data(feature_converter)
+#convert_and_save_data(feature_converter)
