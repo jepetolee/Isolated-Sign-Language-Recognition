@@ -145,7 +145,7 @@ class CNN_Model(tf.keras.Model):
         self.Indentity4 = Identity_Block(80, 0.1)
         self.Flatten = tf.keras.layers.Flatten()
         self.Dense = Dense(250, dropout_exist=False)
-        self.softmax = tf.keras.layers.Softmax(dtype="float32")
+        self.softmax = tf.keras.layers.Softmax(dtype="float32", name="outputs")
 
         self.m21Conv1 = Conv(6, 0.2)
         self.m21Indentity1 = Identity_Block(6, 0.2)

@@ -25,8 +25,8 @@ def read_json_file(file_path=f"./asl-signs/sign_to_prediction_index_map.json"):
 
 
 def tflite_conversion(model):
-    inputs = tf.keras.layers.Input(shape=(543, 3))
-    x = FeatureGen()(inputs)
+    inputs = tf.keras.Input(shape=(543, 3), name="inputs")
+    x = FeatureGen()(tf.cast(inputs, dtype=tf.float32))
     out = model(x)
     # TFLite Conversion
     tflite_keras_model = tf.keras.Model(inputs=inputs, outputs=out)
