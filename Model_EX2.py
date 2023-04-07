@@ -1,6 +1,12 @@
 from get_dataset import  *
-dummy_dataset = get_train_batch_all_signs(X, y, NON_EMPTY_FRAME_IDXS)
 import tensorflow_addons as tfa
+import math
+import tensorflow as tf
+def get_lr_metric(optimizer):
+    def lr(y_true, y_pred):
+        return optimizer.lr
+    return lr
+
 
 def scaled_dot_product(q, k, v, softmax, attention_mask):
     # calculates Q . K(transpose)
@@ -118,12 +124,12 @@ class CustomEmbedding(tf.keras.Model):
         other = tf.repeat(other, S, axis=3)
         other = tf.transpose(other, [0, 1, 3, 2])
         diffs = tf.expand_dims(l, 3) - other
-        diffs = tf.reshape(diffs, [-1, cfg.INPUT_SIZE, S * S])
+        diffs = tf.reshape(diffs, [-1, 32, S * S])
         return diffs
 
     def build(self, input_shape):
         # Positional Embedding, initialized with zeros
-        self.positional_embedding = tf.keras.layers.Embedding(cfg.INPUT_SIZE + 1, 384,
+        self.positional_embedding = tf.keras.layers.Embedding(32 + 1, 384,
                                                               embeddings_initializer=tf.keras.initializers.constant(0.0))
         # Embedding layer for Landmarks
         self.lips_embedding = LandmarkEmbedding(384, 'lips')
@@ -158,9 +164,9 @@ class CustomEmbedding(tf.keras.Model):
         # Add Positional Embedding
         normalised_non_empty_frame_idxs = tf.where(
             tf.math.equal(non_empty_frame_idxs, -1.0),
-            cfg.INPUT_SIZE,
+            32,
             tf.cast(
-                non_empty_frame_idxs / tf.reduce_max(non_empty_frame_idxs, axis=1, keepdims=True) * cfg.INPUT_SIZE,
+                non_empty_frame_idxs / tf.reduce_max(non_empty_frame_idxs, axis=1, keepdims=True) * 32,
                 tf.int32,
             ),
         )
@@ -169,7 +175,7 @@ class CustomEmbedding(tf.keras.Model):
         return x
 
 
-def get_model():
+def get_transformer():
     # Inputs
     frames = tf.keras.layers.Input([32, N_COLS,  3], dtype=tf.float32, name='frames')
     non_empty_frame_idxs = tf.keras.layers.Input([32], dtype=tf.float32, name='non_empty_frame_idxs')
@@ -218,7 +224,7 @@ def get_model():
     # Pooling
     x = tf.reduce_sum(x * mask, axis=1) / tf.reduce_sum(mask, axis=1)
     # Classification Layer
-    x = tf.keras.layers.Dense(cfg.NUM_CLASSES, activation=tf.keras.activations.softmax,
+    x = tf.keras.layers.Dense(250, activation=tf.keras.activations.softmax,
                               kernel_initializer=tf.keras.initializers.glorot_uniform)(x)
     outputs = x
     # Create Tensorflow Model
@@ -230,7 +236,18 @@ def get_model():
     # Adam Optimizer with weight decay
     optimizer = tfa.optimizers.AdamW(learning_rate=1e-3, weight_decay=1e-5, clipnorm=1.0)
 
-    lr_metric = get_lr_metric(optimizer)
-    metrics = ["acc", lr_metric]
+    metrics = [
+            tf.keras.metrics.SparseCategoricalAccuracy(),
+            tf.keras.metrics.SparseTopKCategoricalAccuracy(k=5),
+        ]
     model.compile(loss=loss, optimizer=optimizer, metrics=metrics)
     return model
+
+
+def lrfn(current_step, num_warmup_steps, lr_max, num_cycles=0.50, num_training_steps=50):
+    if current_step < num_warmup_steps:
+        return lr_max * 2 ** -(num_warmup_steps - current_step)
+    else:
+        progress = float(current_step - num_warmup_steps) / float(max(1, num_training_steps - num_warmup_steps))
+
+        return max(0.0, 0.5 * (1.0 + math.cos(math.pi * float(num_cycles) * 2.0 * progress))) * lr_max

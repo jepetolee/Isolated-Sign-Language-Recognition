@@ -1,6 +1,6 @@
 import pandas as pd
-from Parquet2Numpy import FeatureGen
 import tensorflow as tf
+import get_dataset
 
 ROWS_PER_FRAME = 543
 import numpy as np
