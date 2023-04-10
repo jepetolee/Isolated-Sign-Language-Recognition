@@ -1,5 +1,5 @@
 import tensorflow as tf
-from CNN_Model.BaseModels import Dense
+from ModelFactory.BaseModels import Dense
 def scaled_dot_product(q, k, v, softmax):
     # calculates Q . K(transpose)
     qkt = tf.matmul(q, k, transpose_b=True)

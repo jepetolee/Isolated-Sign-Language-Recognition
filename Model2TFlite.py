@@ -4,7 +4,7 @@ import tensorflow as tf
 from GetData.Parquet2Numpy import FeatureGen
 ROWS_PER_FRAME = 543
 import numpy as np
-from CNN_Model.CNNModel import CNN_Model
+from ModelFactory.MakeNTestModel import FinalModel
 def load_relevant_data_subset(pq_path):
     data_columns = ["x", "y", "z"]
     data = pd.read_parquet(pq_path, columns=data_columns)
@@ -43,7 +43,7 @@ def tflite_conversion(model):
 
 
     # print("GT   : ", train_df.sign[0])
-model = CNN_Model()
+model = FinalModel()
 
 model.build((None, 1932, 3))
 print(model.summary())

@@ -123,3 +123,27 @@ class Dense(tf.keras.layers.Layer):
                 'dropout': self.dropout
             })
         return config
+
+class GRUModel(tf.keras.layers.Layer):
+    def __init__(self, units, dropout, num_blocks):
+        super().__init__()
+        self.start_gru = tf.keras.layers.GRU(
+            units=units, dropout=0.0, return_sequences=True
+        )
+        self.end_gru = tf.keras.layers.GRU(
+            units=units, dropout=dropout, return_sequences=False
+        )
+        if (num_blocks - 2) > 0:
+            self.gru_blocks = [
+                tf.keras.layers.GRU(units=units, dropout=dropout, return_sequences=True) for i in range(num_blocks-2)
+            ]
+            self.flag_use_gru_blocks = True
+        else:
+            self.flag_use_gru_blocks = False
+    def call(self, x):
+        x = self.start_gru(x)
+        if self.flag_use_gru_blocks:
+            for blk in self.gru_blocks:
+                x = blk(x)
+        x = self.end_gru(x)
+        return x
